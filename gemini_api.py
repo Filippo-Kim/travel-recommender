@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """
 Gemini API 연동 모듈
-1차 추천(여행지/날씨/행사)을 JSON 형태로 생성한다.
+1) 1차 추천(여행지/날씨/행사)을 JSON 형태로 생성한다.
+2) 1차 추천 + 맛집 목록을 받아 최종 여행 리포트를 Markdown으로 생성한다.
 """
 
 import json
@@ -66,6 +67,7 @@ def call_gemini(prompt):
     return "".join(texts).strip()
 
 
+# ===== 1차 추천 =====
 def extract_json(text):
     """
     LLM 응답 텍스트에서 JSON 부분만 뽑아 파싱한다.
@@ -161,6 +163,75 @@ def get_recommendation(date):
     raise ValueError(f"1차 추천 JSON 생성 실패 (2회 시도): {last_error}")
 
 
+# ===== 최종 리포트 =====
+def format_restaurants(restaurants):
+    """맛집 목록을 프롬프트에 넣을 수 있는 텍스트로 변환한다."""
+    if not restaurants:
+        return "(검색 결과 없음)"
+
+    lines = []
+    for i, place in enumerate(restaurants, start=1):
+        lines.append(
+            f"{i}. {place['name']} / 주소: {place['address']} / "
+            f"분류: {place['category']} / 링크: {place['url']}"
+        )
+    return "\n".join(lines)
+
+
+def build_report_prompt(date, recommendation, restaurants):
+    """최종 리포트 생성용 프롬프트를 만든다."""
+    events = recommendation["events"]
+    events_text = ", ".join(events) if events else "(없음)"
+
+    return f"""아래 데이터를 바탕으로 국내 여행 리포트를 마크다운으로 작성해줘.
+
+# 입력 데이터
+- 여행 날짜: {date}
+- 추천 지역: {recommendation['recommended_city']}
+- 추천 이유: {recommendation['reason']}
+- 날씨: {recommendation['weather']}
+- 행사/축제: {events_text}
+- 맛집 목록:
+{format_restaurants(restaurants)}
+
+# 작성 규칙
+1. 아래 5개 섹션을 이 순서대로 모두 포함한다.
+   - 추천 지역과 추천 이유
+   - 날씨
+   - 행사 및 축제
+   - 맛집 리스트
+   - 1일 추천 일정
+2. 맛집 리스트는 이름, 주소, 분류, 링크를 표 또는 목록으로 정리한다.
+   맛집 목록이 "(검색 결과 없음)"이면 해당 섹션에 "데이터 없음"이라고만 적는다.
+3. 행사가 "(없음)"이면 해당 섹션에 "예정된 행사 정보 없음"이라고 적는다.
+4. 1일 추천 일정은 오전 / 오후 / 저녁 세 구간으로 나누어 작성하고,
+   저녁 구간에는 위 맛집 중 한 곳을 넣는다. (맛집이 없으면 지역 특성에 맞게 제안)
+5. 입력 데이터에 없는 사실을 지어내지 않는다.
+6. 마크다운 본문만 출력하고, 코드블록(```)으로 전체를 감싸지 않는다.
+7. 문서 제목은 "# {date} {recommendation['recommended_city']} 여행 리포트" 로 시작한다."""
+
+
+def strip_outer_fence(text):
+    """응답 전체가 코드블록으로 감싸져 있으면 벗겨낸다."""
+    stripped = text.strip()
+    match = re.fullmatch(r"```(?:markdown|md)?\s*(.*?)\s*```", stripped, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    return stripped
+
+
+def generate_report(date, recommendation, restaurants):
+    """
+    1차 추천 + 맛집 목록을 받아 최종 리포트를 Markdown 텍스트로 생성한다.
+
+    Returns:
+        str: 마크다운 리포트 본문
+    """
+    prompt = build_report_prompt(date, recommendation, restaurants)
+    raw_text = call_gemini(prompt)
+    return strip_outer_fence(raw_text)
+
+
 # ===== 단독 실행 테스트용 =====
 if __name__ == "__main__":
     import sys
@@ -183,5 +254,9 @@ if __name__ == "__main__":
     print(f"행사     : {', '.join(result['events']) if result['events'] else '없음'}")
     print(f"추천 이유: {result['reason']}")
     print("-" * 40)
-    print("\n[파싱된 원본 JSON]")
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+    # 맛집 0건 상황을 가정한 리포트 생성 테스트
+    print("\n[리포트 생성 테스트: 맛집 0건 상황]")
+    print("=" * 60)
+    print(generate_report(target_date, result, []))
+    print("=" * 60)
