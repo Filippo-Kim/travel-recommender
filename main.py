@@ -7,6 +7,7 @@ LLM API(Gemini) + 지도 API(Kakao Local)를 조합하여
 
 import argparse
 import json
+import os
 import sys
 from datetime import datetime
 
@@ -14,6 +15,8 @@ import requests
 
 import gemini_api
 import kakao_api
+
+RESULTS_DIR = "results"
 
 
 # ===== CLI =====
@@ -111,6 +114,98 @@ def step_search_restaurants(city, errors):
     return restaurants
 
 
+def step_generate_report(travel_date, recommendation, restaurants, errors):
+    """3단계: 최종 리포트를 생성한다. 실패하면 수집한 데이터로 기본 리포트를 만든다."""
+    print("[3/3] 리포트 생성 중...")
+    try:
+        report = gemini_api.generate_report(
+            travel_date, recommendation, restaurants
+        )
+        print("      리포트 생성 완료")
+        return report
+    except (ValueError, requests.RequestException) as e:
+        message = f"리포트 생성 실패: {e}"
+        errors.append(message)
+        print(f"      [경고] {message}")
+        print("      수집한 데이터로 기본 리포트를 대신 작성합니다.")
+        return build_fallback_report(travel_date, recommendation, restaurants)
+
+
+def build_fallback_report(travel_date, recommendation, restaurants):
+    """LLM 리포트 생성이 실패했을 때 사용할 최소 리포트."""
+    city = recommendation["recommended_city"]
+    events = recommendation["events"]
+
+    lines = [
+        f"# {travel_date} {city} 여행 리포트",
+        "",
+        "> LLM 리포트 생성에 실패하여 수집 데이터로 자동 구성한 기본 리포트입니다.",
+        "",
+        "## 추천 지역과 추천 이유",
+        f"- 추천 지역: {city}",
+        f"- 추천 이유: {recommendation['reason']}",
+        "",
+        "## 날씨",
+        f"{recommendation['weather']}",
+        "",
+        "## 행사 및 축제",
+    ]
+
+    if events:
+        lines += [f"- {event}" for event in events]
+    else:
+        lines.append("예정된 행사 정보 없음")
+
+    lines += ["", "## 맛집 리스트"]
+
+    if restaurants:
+        lines.append("| 이름 | 주소 | 분류 | 링크 |")
+        lines.append("| --- | --- | --- | --- |")
+        for place in restaurants:
+            lines.append(
+                f"| {place['name']} | {place['address']} | "
+                f"{place['category']} | {place['url']} |"
+            )
+    else:
+        lines.append("데이터 없음")
+
+    return "\n".join(lines) + "\n"
+
+
+# ===== 결과 저장 =====
+def append_errors_section(report, errors):
+    """오류가 있으면 리포트 하단에 errors 섹션을 덧붙인다."""
+    if not errors:
+        return report
+
+    lines = [report.rstrip(), "", "---", "", "## 실행 중 발생한 오류"]
+    lines += [f"- {error}" for error in errors]
+    return "\n".join(lines) + "\n"
+
+
+def save_results(travel_date, recommendation, restaurants, errors, report):
+    """원본 JSON과 최종 리포트를 results/ 폴더에 저장한다."""
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+
+    raw_data = {
+        "date": travel_date,
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "recommendation": recommendation,
+        "restaurants": restaurants,
+        "errors": errors,
+    }
+
+    json_path = os.path.join(RESULTS_DIR, f"{travel_date}_raw.json")
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(raw_data, f, ensure_ascii=False, indent=2)
+
+    report_path = os.path.join(RESULTS_DIR, f"{travel_date}_report.md")
+    with open(report_path, "w", encoding="utf-8") as f:
+        f.write(append_errors_section(report, errors))
+
+    return json_path, report_path
+
+
 # ===== 메인 흐름 =====
 def main():
     args = parse_args()
@@ -122,7 +217,7 @@ def main():
 
     travel_date = args.date
 
-    # 각 단계에서 발생한 오류를 모아두는 리스트 (리포트의 errors 섹션에 사용)
+    # 각 단계에서 발생한 오류를 모아두는 리스트 (JSON의 errors 배열에 사용)
     errors = []
 
     print(f"[시작] 여행 날짜: {travel_date}")
@@ -135,20 +230,20 @@ def main():
         recommendation["recommended_city"], errors
     )
 
-    # --- 6단계에서 구현: 최종 리포트 생성 ---
-    print("[3/3] 리포트 생성 중... (미구현)")
+    # --- 최종 리포트: 1차 추천 + 맛집 목록을 입력으로 사용 ---
+    report = step_generate_report(
+        travel_date, recommendation, restaurants, errors
+    )
 
-    # 연결이 잘 됐는지 확인용 출력 (7단계에서 파일 저장으로 대체 예정)
-    raw_data = {
-        "date": travel_date,
-        "recommendation": recommendation,
-        "restaurants": restaurants,
-        "errors": errors,
-    }
-    print("\n[중간 확인] 수집된 원본 데이터")
-    print(json.dumps(raw_data, ensure_ascii=False, indent=2))
+    # --- 저장 ---
+    json_path, report_path = save_results(
+        travel_date, recommendation, restaurants, errors, report
+    )
 
-    print(f"\n[완료] 오류 {len(errors)}건")
+    print()
+    print(f"[완료] 오류 {len(errors)}건")
+    print(f"       원본 데이터: {json_path}")
+    print(f"       최종 리포트: {report_path}")
 
 
 if __name__ == "__main__":
